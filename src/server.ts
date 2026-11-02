@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+import "dotenv/config";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { FigmaClient } from "./figma-client.js";
+import { createTools } from "./tools.js";
+import { BridgeServer } from "./bridge-server.js";
+import { createPluginTools } from "./tools-plugin.js";
+
+const token = process.env.FIGMA_TOKEN;
+if (!token) {
+  console.error(
+    "FIGMA_TOKEN не задан. Создай .env на основе .env.example и укажи Personal Access Token."
+  );
+  process.exit(1);
+}
+
+const bridgePort = Number(process.env.FIGMA_BRIDGE_PORT ?? 9684);
+const client = new FigmaClient({ token });
+const bridge = new BridgeServer(bridgePort);
+
+const server = new McpServer({
+  name: "guddion-figma",
+  version: "1.0.0",
+});
+
+const allTools = [...createTools(client), ...createPluginTools(bridge)];
+
+for (const tool of allTools) {
+  server.registerTool(
+    tool.name,
+    { description: tool.description, inputSchema: tool.inputSchema as any },
+    async (args: any) => {
+      try {
+        const result = await tool.handler(args);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: `Ошибка: ${message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+}
+
+console.error(`Plugin Bridge слушает ws://localhost:${bridgePort}`);
+
+const transport = new StdioServerTransport();
+await server.connect(transport);

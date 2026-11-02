@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+  <body>
+    <script>
+      const PORT = new URLSearchParams(location.search).get("port") || 9684;
+      let ws;
+      let fileInfo = null;
+
+      function connect() {
+        ws = new WebSocket("ws://localhost:" + PORT);
+        ws.onopen = () => {
+          if (fileInfo) ws.send(JSON.stringify({ type: "hello", ...fileInfo }));
+        };
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data); // команда от сервера: {id, command, params}
+          parent.postMessage({ pluginMessage: msg }, "*");
+        };
+        ws.onclose = () => setTimeout(connect, 2000);
+        ws.onerror = () => {};
+      }
+
+      window.onmessage = (event) => {
+        const msg = event.data && event.data.pluginMessage;
+        if (!msg) return;
+
+        if (msg.type === "init") {
+          fileInfo = { fileKey: msg.fileKey, fileName: msg.fileName };
+          connect();
+          return;
+        }
+
+        // ответ main thread на команду — переслать на сервер
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(msg));
+        }
+      };
+
+      parent.postMessage({ pluginMessage: { type: "ready" } }, "*");
+    </script>
+  </body>
+</html>

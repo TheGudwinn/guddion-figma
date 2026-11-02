@@ -1,0 +1,13 @@
+{
+  "name": "Guddion Figma Bridge",
+  "id": "guddion-figma-bridge-local",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:9684", "ws://localhost:9684"]
+  }
+}
