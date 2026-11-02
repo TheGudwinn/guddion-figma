@@ -1,3 +1,5 @@
+import { DiskCache } from "./disk-cache.js";
+
 const FIGMA_API_BASE = "https://api.figma.com/v1";
 
 export class FigmaApiError extends Error {
@@ -14,33 +16,52 @@ export class FigmaApiError extends Error {
 export interface FigmaClientOptions {
   token: string;
   maxRetries?: number;
+  /** TTL дискового кэша в мс. 0 — кэш выключен. По умолчанию 5 минут. */
+  cacheTtlMs?: number;
 }
 
 /**
  * Тонкий клиент Figma REST API. Делает точечные запросы (по nodeId, не по
  * всему файлу) и ретраит 429 с уважением к Retry-After — см.
- * memory/rest-api/rate-limits.md.
+ * memory/rest-api/rate-limits.md. Повторные GET-запросы кэшируются на диске
+ * на время TTL, чтобы не дёргать API лишний раз при повторных вызовах одной
+ * и той же ноды/файла.
  */
 export class FigmaClient {
   private token: string;
   private maxRetries: number;
+  private cache: DiskCache;
+  private requestTimestamps: number[] = [];
 
   constructor(options: FigmaClientOptions) {
     this.token = options.token;
     this.maxRetries = options.maxRetries ?? 3;
+    this.cache = new DiskCache(options.cacheTtlMs ?? 5 * 60 * 1000);
   }
 
-  private async request<T>(path: string, query?: Record<string, string | number | undefined>): Promise<T> {
+  private async request<T>(
+    path: string,
+    query?: Record<string, string | number | undefined>,
+    opts: { cache?: boolean } = {}
+  ): Promise<T> {
     const url = new URL(FIGMA_API_BASE + path);
     if (query) {
       for (const [key, value] of Object.entries(query)) {
         if (value !== undefined) url.searchParams.set(key, String(value));
       }
     }
+    const cacheKey = url.toString();
+    const useCache = opts.cache ?? true;
+
+    if (useCache) {
+      const cached = this.cache.get<T>(cacheKey);
+      if (cached !== undefined) return cached;
+    }
 
     let attempt = 0;
     while (true) {
-      const res = await fetch(url.toString(), {
+      this.requestTimestamps.push(Date.now());
+      const res = await fetch(cacheKey, {
         headers: { "X-Figma-Token": this.token },
       });
 
@@ -60,13 +81,22 @@ export class FigmaClient {
         );
       }
 
-      return (await res.json()) as T;
+      const json = (await res.json()) as T;
+      if (useCache) this.cache.set(cacheKey, json);
+      return json;
     }
   }
 
-  /** GET /v1/me — используется только чтобы проверить, что токен валиден. */
+  /** Сколько запросов ушло к Figma API за последнюю минуту — Figma не публикует точные квоты по эндпоинтам, это просто фактический счётчик. */
+  getRequestsLastMinute(): number {
+    const cutoff = Date.now() - 60_000;
+    this.requestTimestamps = this.requestTimestamps.filter((t) => t > cutoff);
+    return this.requestTimestamps.length;
+  }
+
+  /** GET /v1/me — кто владелец токена и валиден ли он. */
   async getMe() {
-    return this.request<{ email?: string; handle?: string }>(`/me`);
+    return this.request<{ email?: string; handle?: string }>(`/me`, undefined, { cache: false });
   }
 
   /** GET /files/:key/nodes?ids= — дерево конкретной ноды, не всего файла. */
@@ -90,18 +120,18 @@ export class FigmaClient {
     return { components, componentSets };
   }
 
-  /** GET /images/:key?ids=&format=&scale= — временная ссылка на рендер. */
+  /** GET /images/:key?ids=&format=&scale= — временная ссылка на рендер. Не кэшируется: каждый вызов должен отражать текущее состояние файла. */
   async exportImage(
     fileKey: string,
     nodeIds: string[],
     format: "png" | "svg" | "jpg" = "png",
     scale: number = 1
   ) {
-    return this.request<FigmaImagesResponse>(`/images/${fileKey}`, {
-      ids: nodeIds.join(","),
-      format,
-      scale,
-    });
+    return this.request<FigmaImagesResponse>(
+      `/images/${fileKey}`,
+      { ids: nodeIds.join(","), format, scale },
+      { cache: false }
+    );
   }
 }
 

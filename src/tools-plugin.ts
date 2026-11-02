@@ -1,5 +1,8 @@
 import { z } from "zod";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { BridgeServer } from "./bridge-server.js";
+import { buildTokenExports, type VariablesPayload } from "./tokens.js";
 
 /**
  * MCP-инструменты фазы 2 (Plugin Bridge). Требуют запущенного плагина на
@@ -28,6 +31,28 @@ export function createPluginTools(bridge: BridgeServer) {
       inputSchema: {},
       handler: async () => {
         return bridge.call("get_variables");
+      },
+    },
+
+    {
+      name: "export_tokens",
+      description:
+        "Выгружает локальные Figma variables в DTCG JSON и CSS custom properties (по первому mode каждой коллекции, ссылки между переменными резолвятся в алиасы). Без outputDir возвращает содержимое файлов в ответе, с outputDir — пишет tokens.json и tokens.css на диск.",
+      inputSchema: {
+        outputDir: z.string().optional().describe("Папка для tokens.json и tokens.css; создаётся при необходимости"),
+      },
+      handler: async ({ outputDir }: { outputDir?: string }) => {
+        const payload = (await bridge.call("get_variables")) as VariablesPayload;
+        const { dtcg, css } = buildTokenExports(payload);
+
+        if (!outputDir) return { dtcg, css };
+
+        await mkdir(outputDir, { recursive: true });
+        const dtcgPath = join(outputDir, "tokens.json");
+        const cssPath = join(outputDir, "tokens.css");
+        await writeFile(dtcgPath, JSON.stringify(dtcg, null, 2));
+        await writeFile(cssPath, css);
+        return { dtcgPath, cssPath };
       },
     },
 
@@ -101,6 +126,35 @@ export function createPluginTools(bridge: BridgeServer) {
       },
       handler: async (params: Record<string, unknown>) => {
         return bridge.call("delete_node", params);
+      },
+    },
+
+    {
+      name: "clone_node",
+      description: "Клонирует ноду, опционально в другого родителя и на новую позицию.",
+      inputSchema: {
+        nodeId: z.string().describe("ID ноды для клонирования"),
+        parentNodeId: z.string().optional().describe("Если не задан — клон остаётся в том же родителе"),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        name: z.string().optional(),
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return bridge.call("clone_node", params);
+      },
+    },
+
+    {
+      name: "move_node",
+      description: "Перемещает существующую ноду — меняет родителя и/или позицию x/y.",
+      inputSchema: {
+        nodeId: z.string().describe("ID ноды для перемещения"),
+        parentNodeId: z.string().optional().describe("Новый родитель; если не задан — родитель не меняется"),
+        x: z.number().optional(),
+        y: z.number().optional(),
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return bridge.call("move_node", params);
       },
     },
 

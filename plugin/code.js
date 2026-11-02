@@ -36,6 +36,10 @@ async function handleCommand(command, params) {
       return updateNode(params);
     case "delete_node":
       return deleteNode(params);
+    case "clone_node":
+      return cloneNode(params);
+    case "move_node":
+      return moveNode(params);
     case "find_node":
       return findNode(params);
     case "get_selection":
@@ -183,4 +187,50 @@ async function deleteNode(params) {
 
   node.remove();
   return { deleted: nodeId };
+}
+
+async function resolveParent(parentNodeId) {
+  if (!parentNodeId) return figma.currentPage;
+  const parent = await figma.getNodeByIdAsync(parentNodeId);
+  if (!parent || typeof parent.appendChild !== "function") {
+    throw new Error(`Родительская нода ${parentNodeId} не найдена или не может содержать детей`);
+  }
+  return parent;
+}
+
+async function cloneNode(params) {
+  const { nodeId, parentNodeId, x, y, name } = params || {};
+  if (!nodeId) throw new Error("Нужен nodeId");
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node || typeof node.clone !== "function") {
+    throw new Error(`Нода ${nodeId} не найдена или не поддерживает клонирование`);
+  }
+
+  const clone = node.clone();
+  const parent = await resolveParent(parentNodeId);
+  parent.appendChild(clone);
+
+  if (x !== undefined) clone.x = x;
+  if (y !== undefined) clone.y = y;
+  if (name) clone.name = name;
+
+  return { nodeId: clone.id };
+}
+
+async function moveNode(params) {
+  const { nodeId, parentNodeId, x, y } = params || {};
+  if (!nodeId) throw new Error("Нужен nodeId");
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error(`Нода ${nodeId} не найдена`);
+
+  if (parentNodeId !== undefined) {
+    const parent = await resolveParent(parentNodeId);
+    parent.appendChild(node);
+  }
+  if (x !== undefined) node.x = x;
+  if (y !== undefined) node.y = y;
+
+  return { id: node.id, parentId: node.parent ? node.parent.id : null, x: node.x, y: node.y };
 }
