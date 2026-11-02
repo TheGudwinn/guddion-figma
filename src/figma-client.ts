@@ -64,6 +64,11 @@ export class FigmaClient {
     }
   }
 
+  /** GET /v1/me — используется только чтобы проверить, что токен валиден. */
+  async getMe() {
+    return this.request<{ email?: string; handle?: string }>(`/me`);
+  }
+
   /** GET /files/:key/nodes?ids= — дерево конкретной ноды, не всего файла. */
   async getFileNodes(fileKey: string, nodeIds: string[]) {
     return this.request<FigmaNodesResponse>(`/files/${fileKey}/nodes`, {

@@ -49,5 +49,16 @@ for (const tool of allTools) {
 
 console.error(`Plugin Bridge слушает ws://localhost:${bridgePort}`);
 
+client
+  .getMe()
+  .then((me) => console.error(`Figma-токен валиден (аккаунт: ${me.handle ?? me.email ?? "?"})`))
+  .catch((err) =>
+    console.error(
+      `Не удалось проверить FIGMA_TOKEN при старте (REST-инструменты скорее всего не заработают): ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+  );
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

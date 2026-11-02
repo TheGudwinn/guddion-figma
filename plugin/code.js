@@ -28,8 +28,16 @@ async function handleCommand(command, params) {
   switch (command) {
     case "get_variables":
       return getVariables();
+    case "set_variable":
+      return setVariable(params);
     case "write_node":
       return writeNode(params);
+    case "update_node":
+      return updateNode(params);
+    case "delete_node":
+      return deleteNode(params);
+    case "find_node":
+      return findNode(params);
     case "get_selection":
       return getSelection();
     default:
@@ -59,6 +67,38 @@ async function getVariables() {
 
 function getSelection() {
   return figma.currentPage.selection.map((n) => ({ id: n.id, name: n.name, type: n.type }));
+}
+
+async function setVariable(params) {
+  const { variableId, modeId, value } = params || {};
+  if (!variableId || !modeId) {
+    throw new Error("Нужны variableId и modeId");
+  }
+  const variable = await figma.variables.getVariableByIdAsync(variableId);
+  if (!variable) {
+    throw new Error(`Variable ${variableId} не найдена`);
+  }
+  variable.setValueForMode(modeId, value);
+  return { id: variable.id, name: variable.name, valuesByMode: variable.valuesByMode };
+}
+
+async function findNode(params) {
+  const { query, type, parentNodeId } = params || {};
+  const root = parentNodeId
+    ? await figma.getNodeByIdAsync(parentNodeId)
+    : figma.currentPage;
+  if (!root || typeof root.findAll !== "function") {
+    throw new Error(`Нода ${parentNodeId} не найдена или не содержит детей`);
+  }
+
+  const needle = (query || "").toLowerCase();
+  const matches = root.findAll((n) => {
+    if (type && n.type !== type) return false;
+    if (needle && !n.name.toLowerCase().includes(needle)) return false;
+    return true;
+  });
+
+  return matches.slice(0, 100).map((n) => ({ id: n.id, name: n.name, type: n.type }));
 }
 
 async function writeNode(params) {
@@ -105,4 +145,42 @@ async function writeNode(params) {
   parent.appendChild(node);
 
   return { nodeId: node.id };
+}
+
+async function updateNode(params) {
+  const { nodeId, name, x, y, width, height, fills, text, visible, opacity } = params || {};
+  if (!nodeId) throw new Error("Нужен nodeId");
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error(`Нода ${nodeId} не найдена`);
+
+  if (name !== undefined) node.name = name;
+  if (x !== undefined) node.x = x;
+  if (y !== undefined) node.y = y;
+  if (visible !== undefined) node.visible = visible;
+  if (opacity !== undefined) node.opacity = opacity;
+  if (fills !== undefined) node.fills = fills;
+
+  if ((width !== undefined || height !== undefined) && typeof node.resize === "function") {
+    node.resize(width ?? node.width, height ?? node.height);
+  }
+
+  if (text !== undefined) {
+    if (node.type !== "TEXT") throw new Error(`Нода ${nodeId} не TEXT, нельзя задать text`);
+    await figma.loadFontAsync(node.fontName);
+    node.characters = text;
+  }
+
+  return { id: node.id, name: node.name, type: node.type };
+}
+
+async function deleteNode(params) {
+  const { nodeId } = params || {};
+  if (!nodeId) throw new Error("Нужен nodeId");
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error(`Нода ${nodeId} не найдена`);
+
+  node.remove();
+  return { deleted: nodeId };
 }

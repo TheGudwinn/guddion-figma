@@ -8,8 +8,12 @@
   },
   "scripts": {
     "build": "tsc",
+    "postinstall": "tsc",
     "start": "node dist/server.js",
     "dev": "tsc && node dist/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "keywords": [
     "figma",

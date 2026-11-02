@@ -41,6 +41,20 @@ export function createPluginTools(bridge: BridgeServer) {
     },
 
     {
+      name: "find_node",
+      description:
+        "Ищет ноды в открытом файле по имени (подстрока, без учёта регистра) и/или типу. Возвращает id, чтобы передать его в update_node/delete_node/write_node без ручного копирования ссылки из Figma.",
+      inputSchema: {
+        query: z.string().optional().describe("Подстрока имени ноды для поиска"),
+        type: z.string().optional().describe("Фильтр по типу ноды, например FRAME, TEXT, COMPONENT"),
+        parentNodeId: z.string().optional().describe("Если не задан — ищет по всей текущей странице"),
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return bridge.call("find_node", params);
+      },
+    },
+
+    {
       name: "write_node",
       description:
         "Создаёт ноду (FRAME, RECTANGLE или TEXT) в открытом файле Figma через плагин. REST API Figma не поддерживает запись — только Plugin Bridge.",
@@ -56,6 +70,51 @@ export function createPluginTools(bridge: BridgeServer) {
       },
       handler: async (params: Record<string, unknown>) => {
         return bridge.call("write_node", params);
+      },
+    },
+
+    {
+      name: "update_node",
+      description:
+        "Меняет свойства существующей ноды: имя, позицию, размер, fills, видимость, прозрачность, текст (для TEXT-нод). Передавай только те поля, которые нужно изменить.",
+      inputSchema: {
+        nodeId: z.string().describe("ID ноды, которую меняем"),
+        name: z.string().optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        width: z.number().optional(),
+        height: z.number().optional(),
+        visible: z.boolean().optional(),
+        opacity: z.number().min(0).max(1).optional(),
+        text: z.string().optional().describe("Новый текст, только для type=TEXT"),
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return bridge.call("update_node", params);
+      },
+    },
+
+    {
+      name: "delete_node",
+      description: "Удаляет ноду из открытого файла Figma по id.",
+      inputSchema: {
+        nodeId: z.string().describe("ID ноды для удаления"),
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return bridge.call("delete_node", params);
+      },
+    },
+
+    {
+      name: "set_variable",
+      description:
+        "Устанавливает значение Figma variable для конкретного режима (mode). Используй get_variables, чтобы узнать variableId и modeId.",
+      inputSchema: {
+        variableId: z.string(),
+        modeId: z.string(),
+        value: z.any().describe("Новое значение — тип зависит от resolvedType переменной (COLOR/FLOAT/STRING/BOOLEAN)"),
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return bridge.call("set_variable", params);
       },
     },
   ];
