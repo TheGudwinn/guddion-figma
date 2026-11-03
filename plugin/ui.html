@@ -24,7 +24,12 @@
         if (!msg) return;
 
         if (msg.type === "init") {
-          fileInfo = { fileKey: msg.fileKey, fileName: msg.fileName };
+          fileInfo = {
+            fileKey: msg.fileKey,
+            fileName: msg.fileName,
+            pageId: msg.pageId,
+            pageName: msg.pageName,
+          };
           connect();
           return;
         }

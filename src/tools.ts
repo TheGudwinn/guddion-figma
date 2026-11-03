@@ -9,6 +9,9 @@ import { resolveFigmaLink } from "./resolve-link.js";
  * { name, description, inputSchema, handler }, чтобы server.ts мог
  * зарегистрировать их единообразно через registerTool.
  */
+/** Дефолтная глубина get_node_tree — защита от зависания на огромных деревьях, если вызывающий не задал maxDepth явно. */
+const DEFAULT_TREE_MAX_DEPTH = 15;
+
 export function createTools(client: FigmaClient) {
   return [
     {
@@ -27,7 +30,7 @@ export function createTools(client: FigmaClient) {
     {
       name: "get_node_tree",
       description:
-        "Возвращает дерево конкретной ноды (фрейма/секции) Figma: layout, fills, strokes, текст, инлайн-стили и компоненты. Не скачивает весь файл.",
+        "Возвращает дерево конкретной ноды (фрейма/секции) Figma: layout, fills, strokes, текст, инлайн-стили и компоненты. Не скачивает весь файл. По умолчанию глубина ограничена 15 уровнями (чтобы не зависнуть на огромном дереве) — укроти явным maxDepth для контроля или сначала вызови get_metadata, чтобы оценить размер.",
       inputSchema: {
         fileKey: z.string().describe("Ключ файла Figma"),
         nodeId: z.string().describe("ID ноды в формате '123:456' (не '123-456')"),
@@ -36,7 +39,7 @@ export function createTools(client: FigmaClient) {
           .int()
           .min(1)
           .optional()
-          .describe("Ограничить глубину вложенности детей — полезно на больших фреймах, чтобы не раздувать ответ"),
+          .describe("Ограничить глубину вложенности детей. По умолчанию 15 — передай больше, если точно нужно глубже"),
       },
       handler: async ({
         fileKey,
@@ -49,8 +52,9 @@ export function createTools(client: FigmaClient) {
       }) => {
         const result = await client.getFileNodes(fileKey, [nodeId]);
         const node = result.nodes[nodeId] ?? result;
-        if (maxDepth !== undefined && node && typeof node === "object" && "document" in node) {
-          pruneDepth((node as { document: unknown }).document, maxDepth);
+        const effectiveMaxDepth = maxDepth ?? DEFAULT_TREE_MAX_DEPTH;
+        if (node && typeof node === "object" && "document" in node) {
+          pruneDepth((node as { document: unknown }).document, effectiveMaxDepth);
         }
         return node;
       },

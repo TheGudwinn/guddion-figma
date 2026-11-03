@@ -7,8 +7,10 @@ figma.ui.onmessage = async (msg) => {
   if (msg && msg.type === "ready") {
     figma.ui.postMessage({
       type: "init",
-      fileKey: figma.fileKey || "",
+      fileKey: figma.fileKey || null,
       fileName: figma.root.name,
+      pageId: figma.currentPage.id,
+      pageName: figma.currentPage.name,
     });
     return;
   }
@@ -42,10 +44,16 @@ async function handleCommand(command, params) {
       return moveNode(params);
     case "find_node":
       return findNode(params);
+    case "get_node":
+      return getNode(params);
+    case "create_instance":
+      return createInstance(params);
+    case "set_variable_binding":
+      return setVariableBinding(params);
     case "get_selection":
       return getSelection();
     default:
-      throw new Error(`Неизвестная команда: ${command}`);
+      throw new Error(`UNKNOWN_COMMAND: неизвестная команда "${command}"`);
   }
 }
 
@@ -130,7 +138,7 @@ async function writeNode(params) {
     await figma.loadFontAsync(node.fontName);
     node.characters = text || "";
   } else {
-    throw new Error(`Неподдерживаемый тип ноды: ${type}. Поддерживаются: FRAME, RECTANGLE, TEXT`);
+    throw new Error(`Неподдерживаемый тип ноды: ${type}. Поддерживаются: FRAME, RECTANGLE, TEXT (для компонентов — create_instance)`);
   }
 
   node.x = x;
@@ -138,15 +146,10 @@ async function writeNode(params) {
   if (name) node.name = name;
   if (fills) node.fills = fills;
 
-  let parent = figma.currentPage;
-  if (parentNodeId) {
-    const found = await figma.getNodeByIdAsync(parentNodeId);
-    if (!found || typeof found.appendChild !== "function") {
-      throw new Error(`Родительская нода ${parentNodeId} не найдена или не может содержать детей`);
-    }
-    parent = found;
-  }
+  const parent = await resolveParent(parentNodeId);
   parent.appendChild(node);
+
+  await applyStyleAndLayout(node, params);
 
   return { nodeId: node.id };
 }
@@ -175,7 +178,140 @@ async function updateNode(params) {
     node.characters = text;
   }
 
+  await applyStyleAndLayout(node, params);
+
   return { id: node.id, name: node.name, type: node.type };
+}
+
+/**
+ * Применяет к ноде strokes/cornerRadius/effects/opacity, типографику (для
+ * TEXT) и Auto Layout (для FRAME/COMPONENT/INSTANCE) — общий код для
+ * writeNode и updateNode. Все поля опциональны, трогаем только то, что
+ * передано.
+ */
+async function applyStyleAndLayout(node, params) {
+  const { strokes, strokeWeight, cornerRadius, effects, typography, layout } = params || {};
+
+  if (strokes !== undefined) node.strokes = strokes;
+  if (strokeWeight !== undefined) node.strokeWeight = strokeWeight;
+  if (cornerRadius !== undefined && "cornerRadius" in node) node.cornerRadius = cornerRadius;
+  if (effects !== undefined) node.effects = effects;
+
+  if (typography && node.type === "TEXT") {
+    await applyTypography(node, typography);
+  }
+
+  if (layout) {
+    if ("layoutMode" in node) applyAutoLayout(node, layout);
+    // sizing-поля требуют, чтобы нода уже была ребёнком auto-layout родителя — на этот момент appendChild уже вызван.
+    if (layout.sizingHorizontal !== undefined && "layoutSizingHorizontal" in node) {
+      node.layoutSizingHorizontal = layout.sizingHorizontal;
+    }
+    if (layout.sizingVertical !== undefined && "layoutSizingVertical" in node) {
+      node.layoutSizingVertical = layout.sizingVertical;
+    }
+  }
+}
+
+async function applyTypography(node, typography) {
+  const { fontFamily, fontStyle, fontSize, textAlignHorizontal, lineHeight, letterSpacing } = typography;
+
+  const targetFont = fontFamily ? { family: fontFamily, style: fontStyle || node.fontName.style } : node.fontName;
+  await figma.loadFontAsync(targetFont);
+  node.fontName = targetFont;
+
+  if (fontSize !== undefined) node.fontSize = fontSize;
+  if (textAlignHorizontal !== undefined) node.textAlignHorizontal = textAlignHorizontal;
+  if (lineHeight !== undefined) node.lineHeight = lineHeight;
+  if (letterSpacing !== undefined) node.letterSpacing = letterSpacing;
+}
+
+function applyAutoLayout(node, layout) {
+  if (layout.mode !== undefined) node.layoutMode = layout.mode;
+  if (layout.gap !== undefined) node.itemSpacing = layout.gap;
+  if (layout.padding !== undefined) {
+    node.paddingLeft = node.paddingRight = node.paddingTop = node.paddingBottom = layout.padding;
+  }
+  if (layout.paddingLeft !== undefined) node.paddingLeft = layout.paddingLeft;
+  if (layout.paddingRight !== undefined) node.paddingRight = layout.paddingRight;
+  if (layout.paddingTop !== undefined) node.paddingTop = layout.paddingTop;
+  if (layout.paddingBottom !== undefined) node.paddingBottom = layout.paddingBottom;
+  if (layout.primaryAxisSizingMode !== undefined) node.primaryAxisSizingMode = layout.primaryAxisSizingMode;
+  if (layout.counterAxisSizingMode !== undefined) node.counterAxisSizingMode = layout.counterAxisSizingMode;
+  if (layout.primaryAxisAlignItems !== undefined) node.primaryAxisAlignItems = layout.primaryAxisAlignItems;
+  if (layout.counterAxisAlignItems !== undefined) node.counterAxisAlignItems = layout.counterAxisAlignItems;
+}
+
+function getNode(params) {
+  const { nodeId } = params || {};
+  if (!nodeId) throw new Error("Нужен nodeId");
+  return figma.getNodeByIdAsync(nodeId).then((node) => {
+    if (!node) throw new Error(`Нода ${nodeId} не найдена`);
+    const box = typeof node.absoluteBoundingBox !== "undefined" ? node.absoluteBoundingBox : null;
+    return {
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      parentId: node.parent ? node.parent.id : null,
+      x: "x" in node ? node.x : undefined,
+      y: "y" in node ? node.y : undefined,
+      width: box ? box.width : "width" in node ? node.width : undefined,
+      height: box ? box.height : "height" in node ? node.height : undefined,
+    };
+  });
+}
+
+async function createInstance(params) {
+  const { componentKey, componentNodeId, parentNodeId, x = 0, y = 0, name } = params || {};
+
+  let component;
+  if (componentNodeId) {
+    component = await figma.getNodeByIdAsync(componentNodeId);
+    if (!component || component.type !== "COMPONENT") {
+      throw new Error(`Нода ${componentNodeId} не найдена или не является COMPONENT`);
+    }
+  } else if (componentKey) {
+    component = await figma.importComponentByKeyAsync(componentKey);
+  } else {
+    throw new Error("Нужен componentKey (из get_components) или componentNodeId локального компонента");
+  }
+
+  const instance = component.createInstance();
+  const parent = await resolveParent(parentNodeId);
+  parent.appendChild(instance);
+  instance.x = x;
+  instance.y = y;
+  if (name) instance.name = name;
+
+  return { nodeId: instance.id };
+}
+
+async function setVariableBinding(params) {
+  const { nodeId, field, variableId, paintIndex = 0 } = params || {};
+  if (!nodeId || !field || !variableId) throw new Error("Нужны nodeId, field и variableId");
+
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error(`Нода ${nodeId} не найдена`);
+
+  const variable = await figma.variables.getVariableByIdAsync(variableId);
+  if (!variable) throw new Error(`Variable ${variableId} не найдена`);
+
+  if (field === "fills" || field === "strokes") {
+    const paints = node[field];
+    if (!Array.isArray(paints) || !paints[paintIndex]) {
+      throw new Error(`У ноды нет ${field}[${paintIndex}]`);
+    }
+    const updated = paints.slice();
+    updated[paintIndex] = figma.variables.setBoundVariableForPaint(updated[paintIndex], "color", variable);
+    node[field] = updated;
+  } else {
+    if (typeof node.setBoundVariable !== "function") {
+      throw new Error(`Нода ${nodeId} не поддерживает variable bindings`);
+    }
+    node.setBoundVariable(field, variable);
+  }
+
+  return { id: node.id, field, variableId };
 }
 
 async function deleteNode(params) {

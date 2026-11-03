@@ -18,6 +18,8 @@ export interface FigmaClientOptions {
   maxRetries?: number;
   /** TTL дискового кэша в мс. 0 — кэш выключен. По умолчанию 5 минут. */
   cacheTtlMs?: number;
+  /** Таймаут одного HTTP-запроса в мс — чтобы зависший запрос к Figma не вис бесконечно. По умолчанию 20 секунд. */
+  timeoutMs?: number;
 }
 
 /**
@@ -32,11 +34,13 @@ export class FigmaClient {
   private maxRetries: number;
   private cache: DiskCache;
   private requestTimestamps: number[] = [];
+  private timeoutMs: number;
 
   constructor(options: FigmaClientOptions) {
     this.token = options.token;
     this.maxRetries = options.maxRetries ?? 3;
     this.cache = new DiskCache(options.cacheTtlMs ?? 5 * 60 * 1000);
+    this.timeoutMs = options.timeoutMs ?? 20_000;
   }
 
   private async request<T>(
@@ -61,9 +65,22 @@ export class FigmaClient {
     let attempt = 0;
     while (true) {
       this.requestTimestamps.push(Date.now());
-      const res = await fetch(cacheKey, {
-        headers: { "X-Figma-Token": this.token },
-      });
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => controller.abort(), this.timeoutMs);
+      let res: Response;
+      try {
+        res = await fetch(cacheKey, {
+          headers: { "X-Figma-Token": this.token },
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          throw new FigmaApiError(`REST_TIMEOUT: Figma API не ответил за ${this.timeoutMs}мс на ${path}`, 0);
+        }
+        throw err;
+      } finally {
+        clearTimeout(abortTimer);
+      }
 
       if (res.status === 429 && attempt < this.maxRetries) {
         const retryAfter = Number(res.headers.get("Retry-After") ?? "1");

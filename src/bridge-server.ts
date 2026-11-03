@@ -8,23 +8,46 @@ interface PendingCall {
 }
 
 export interface PluginInfo {
-  fileKey: string;
+  fileKey: string | null;
   fileName: string;
+  pageId?: string;
+  pageName?: string;
+  url: string | null;
 }
+
+/** Ошибка с машинно-читаемым кодом — агент может ветвиться по err.code, а не парсить текст. */
+export class BridgeError extends Error {
+  constructor(
+    public code: "BRIDGE_NOT_RUNNING" | "PLUGIN_DISCONNECTED" | "CALL_TIMEOUT",
+    message: string
+  ) {
+    super(`${code}: ${message}`);
+    this.name = "BridgeError";
+  }
+}
+
+const HEARTBEAT_INTERVAL_MS = 20_000;
 
 /**
  * Websocket-сервер для Plugin Bridge. Плагин Figma подключается к нему
  * через UI-iframe (у main thread плагина нет сетевого доступа — см.
  * memory/plugin-bridge/protocol.md). Один активный клиент одновременно,
  * leader/follower координация не нужна для нашего сценария.
+ *
+ * Держит keepalive пингами (браузерный WebSocket отвечает на ping pong'ом
+ * автоматически, без участия кода плагина) — если клиент не ответил за
+ * два цикла, считаем соединение мёртвым и закрываем его, чтобы плагин
+ * переподключился, а не висел в псевдо-живом состоянии.
  */
 export class BridgeServer {
   private wss: WebSocketServer;
-  private client: WebSocket | null = null;
+  private client: (WebSocket & { isAlive?: boolean }) | null = null;
   private pluginInfo: PluginInfo | null = null;
   private pending = new Map<string, PendingCall>();
+  private operationResults = new Map<string, unknown>();
   private callTimeoutMs: number;
   private bindError: string | null = null;
+  private heartbeat: NodeJS.Timeout;
 
   constructor(port: number, callTimeoutMs = 10_000) {
     this.callTimeoutMs = callTimeoutMs;
@@ -41,10 +64,15 @@ export class BridgeServer {
       console.error(`[bridge] не удалось запустить websocket-сервер: ${this.bindError}`);
     });
 
-    this.wss.on("connection", (ws) => {
+    this.wss.on("connection", (ws: WebSocket & { isAlive?: boolean }) => {
       // Новый клиент заменяет предыдущего — в сценарии "один открытый файл" это ожидаемо.
       this.client = ws;
+      ws.isAlive = true;
       console.error("[bridge] плагин подключился, жду hello...");
+
+      ws.on("pong", () => {
+        ws.isAlive = true;
+      });
 
       ws.on("message", (raw) => {
         this.handleMessage(raw.toString());
@@ -57,10 +85,21 @@ export class BridgeServer {
           );
           this.client = null;
           this.pluginInfo = null;
-          this.rejectAllPending(new Error("Plugin отключился"));
+          this.rejectAllPending(new BridgeError("PLUGIN_DISCONNECTED", "Plugin отключился"));
         }
       });
     });
+
+    this.heartbeat = setInterval(() => {
+      if (!this.client) return;
+      if (this.client.isAlive === false) {
+        console.error("[bridge] плагин не ответил на ping, закрываю соединение для переподключения");
+        this.client.terminate();
+        return;
+      }
+      this.client.isAlive = false;
+      this.client.ping();
+    }, HEARTBEAT_INTERVAL_MS).unref();
   }
 
   private handleMessage(raw: string) {
@@ -72,8 +111,15 @@ export class BridgeServer {
     }
 
     if (msg.type === "hello") {
-      this.pluginInfo = { fileKey: msg.fileKey, fileName: msg.fileName };
-      console.error(`[bridge] hello получен — файл: "${msg.fileName}" (${msg.fileKey})`);
+      const fileKey = msg.fileKey ?? null;
+      this.pluginInfo = {
+        fileKey,
+        fileName: msg.fileName,
+        pageId: msg.pageId,
+        pageName: msg.pageName,
+        url: fileKey ? `https://www.figma.com/design/${fileKey}/${encodeURIComponent(msg.fileName ?? "")}` : null,
+      };
+      console.error(`[bridge] hello получен — файл: "${msg.fileName}" (${fileKey ?? "fileKey недоступен"})`);
       return;
     }
 
@@ -106,13 +152,23 @@ export class BridgeServer {
     return this.pluginInfo;
   }
 
-  async call(command: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  /**
+   * operationId делает вызов идемпотентным: повторный call с тем же
+   * operationId (например, после сетевого таймаута на стороне MCP-клиента)
+   * вернёт закэшированный результат вместо повторного выполнения записи.
+   */
+  async call(command: string, params: Record<string, unknown> = {}, operationId?: string): Promise<unknown> {
+    if (operationId && this.operationResults.has(operationId)) {
+      return this.operationResults.get(operationId);
+    }
+
     if (this.bindError) {
-      throw new Error(`Bridge-сервер не запущен: ${this.bindError}`);
+      throw new BridgeError("BRIDGE_NOT_RUNNING", `Bridge-сервер не запущен: ${this.bindError}`);
     }
     if (!this.isConnected() || !this.client) {
-      throw new Error(
-        "Plugin не подключён. Открой нужный файл в Figma Desktop и запусти плагин Guddion Figma Bridge (см. memory/plugin-bridge/)."
+      throw new BridgeError(
+        "PLUGIN_DISCONNECTED",
+        "Plugin не подключён. Открой нужный файл в Figma Desktop и запусти плагин Guddion Figma Bridge."
       );
     }
 
@@ -120,17 +176,20 @@ export class BridgeServer {
     const promise = new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Plugin не ответил за ${this.callTimeoutMs}мс на команду "${command}"`));
+        reject(new BridgeError("CALL_TIMEOUT", `Plugin не ответил за ${this.callTimeoutMs}мс на команду "${command}"`));
       }, this.callTimeoutMs);
       this.pending.set(id, { resolve, reject, timeout });
     });
 
     this.client.send(JSON.stringify({ id, command, params }));
-    return promise;
+    const result = await promise;
+    if (operationId) this.operationResults.set(operationId, result);
+    return result;
   }
 
   close() {
-    this.rejectAllPending(new Error("Bridge-сервер остановлен"));
+    clearInterval(this.heartbeat);
+    this.rejectAllPending(new BridgeError("PLUGIN_DISCONNECTED", "Bridge-сервер остановлен"));
     this.wss.close();
   }
 }
