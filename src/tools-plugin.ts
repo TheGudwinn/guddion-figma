@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BridgeServer } from "./bridge-server.js";
 import { buildTokenExports, type VariablesPayload } from "./tokens.js";
+import { createImageTools } from "./tools-images.js";
 
 const typographySchema = z
   .object({
@@ -12,6 +13,7 @@ const typographySchema = z
     textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]).optional(),
     lineHeight: z.any().optional().describe("Число (px), '100%' или объект {unit, value} как в Plugin API"),
     letterSpacing: z.any().optional().describe("Число (px) или объект {unit, value} как в Plugin API"),
+    textAutoResize: z.enum(["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"]).optional(),
   })
   .optional()
   .describe("Типографика — только для TEXT-нод");
@@ -41,6 +43,7 @@ const styleFields = {
   strokeWeight: z.number().optional(),
   cornerRadius: z.number().optional(),
   effects: z.array(z.any()).optional().describe("Массив Effect (тени и т.п.) как в Figma Plugin API"),
+  clipsContent: z.boolean().optional().describe("Обрезать ли содержимое фрейма по его границам"),
   typography: typographySchema,
   layout: layoutSchema,
 };
@@ -56,6 +59,8 @@ const operationIdField = z
  */
 export function createPluginTools(bridge: BridgeServer) {
   return [
+    ...createImageTools(bridge),
+
     {
       name: "get_plugin_status",
       description:
@@ -135,8 +140,8 @@ export function createPluginTools(bridge: BridgeServer) {
         parentNodeId: z.string().optional().describe("Если не задан — нода создаётся на текущей странице"),
         x: z.number().default(0),
         y: z.number().default(0),
-        width: z.number().default(100),
-        height: z.number().default(100),
+        width: z.number().optional().describe("FRAME/RECTANGLE: по умолчанию 100. TEXT: ширина блока с переносом строк"),
+        height: z.number().optional().describe("FRAME/RECTANGLE: по умолчанию 100. TEXT: без неё высота подстраивается сама"),
         text: z.string().optional().describe("Текст для type=TEXT"),
         ...styleFields,
         operationId: operationIdField,

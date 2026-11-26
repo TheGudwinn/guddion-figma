@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 interface PendingCall {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
-  timeout: NodeJS.Timeout;
+  timeout?: NodeJS.Timeout;
 }
 
 export interface PluginInfo {
@@ -28,6 +28,18 @@ export class BridgeError extends Error {
 
 const HEARTBEAT_INTERVAL_MS = 20_000;
 
+function timeoutError(timeoutMs: number, command: string): BridgeError {
+  return new BridgeError("CALL_TIMEOUT", `Plugin не ответил за ${timeoutMs}мс на команду "${command}"`);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, command: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError(timeoutMs, command)), timeoutMs);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Websocket-сервер для Plugin Bridge. Плагин Figma подключается к нему
  * через UI-iframe (у main thread плагина нет сетевого доступа — см.
@@ -44,7 +56,7 @@ export class BridgeServer {
   private client: (WebSocket & { isAlive?: boolean }) | null = null;
   private pluginInfo: PluginInfo | null = null;
   private pending = new Map<string, PendingCall>();
-  private operationResults = new Map<string, unknown>();
+  private operations = new Map<string, Promise<unknown>>();
   private callTimeoutMs: number;
   private bindError: string | null = null;
   private heartbeat: NodeJS.Timeout;
@@ -154,37 +166,60 @@ export class BridgeServer {
 
   /**
    * operationId делает вызов идемпотентным: повторный call с тем же
-   * operationId (например, после сетевого таймаута на стороне MCP-клиента)
-   * вернёт закэшированный результат вместо повторного выполнения записи.
+   * operationId вернёт результат первой попытки вместо повторной записи — даже
+   * если та отвалилась по CALL_TIMEOUT, а плагин ответил (или ещё ответит) позже.
    */
-  async call(command: string, params: Record<string, unknown> = {}, operationId?: string): Promise<unknown> {
-    if (operationId && this.operationResults.has(operationId)) {
-      return this.operationResults.get(operationId);
+  async call(
+    command: string,
+    params: Record<string, unknown> = {},
+    operationId?: string,
+    timeoutMs: number = this.callTimeoutMs
+  ): Promise<unknown> {
+    let result = operationId ? this.operations.get(operationId) : undefined;
+
+    if (!result) {
+      if (this.bindError) {
+        throw new BridgeError("BRIDGE_NOT_RUNNING", `Bridge-сервер не запущен: ${this.bindError}`);
+      }
+      if (!this.isConnected() || !this.client) {
+        throw new BridgeError(
+          "PLUGIN_DISCONNECTED",
+          "Plugin не подключён. Открой нужный файл в Figma Desktop и запусти плагин Guddion Figma Bridge."
+        );
+      }
+      result = this.send(this.client, command, params, operationId ? undefined : timeoutMs);
+      if (operationId) {
+        this.operations.set(operationId, result);
+        // Неудачную операцию забываем, чтобы повтор действительно выполнился.
+        result.catch(() => this.operations.delete(operationId));
+      }
     }
 
-    if (this.bindError) {
-      throw new BridgeError("BRIDGE_NOT_RUNNING", `Bridge-сервер не запущен: ${this.bindError}`);
-    }
-    if (!this.isConnected() || !this.client) {
-      throw new BridgeError(
-        "PLUGIN_DISCONNECTED",
-        "Plugin не подключён. Открой нужный файл в Figma Desktop и запусти плагин Guddion Figma Bridge."
-      );
-    }
+    return withTimeout(result, timeoutMs, command);
+  }
 
+  /**
+   * Без timeoutMs запрос ждёт ответа плагина до разрыва соединения — так поздний
+   * ответ на операцию с operationId не теряется.
+   */
+  private send(
+    client: WebSocket,
+    command: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number
+  ): Promise<unknown> {
     const id = randomUUID();
-    const promise = new Promise<unknown>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new BridgeError("CALL_TIMEOUT", `Plugin не ответил за ${this.callTimeoutMs}мс на команду "${command}"`));
-      }, this.callTimeoutMs);
+    return new Promise<unknown>((resolve, reject) => {
+      const timeout =
+        timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              this.pending.delete(id);
+              reject(timeoutError(timeoutMs, command));
+            }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout });
+      client.send(JSON.stringify({ id, command, params }));
     });
-
-    this.client.send(JSON.stringify({ id, command, params }));
-    const result = await promise;
-    if (operationId) this.operationResults.set(operationId, result);
-    return result;
   }
 
   close() {
